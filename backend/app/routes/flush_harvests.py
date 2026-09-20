@@ -1,12 +1,12 @@
-from datetime import datetime, timezone
-
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required
+from marshmallow import ValidationError
 
 from app.database import SessionLocal
 from app.models.flush_harvest import FlushHarvest
 from app.models.room import Room
 from app.schemas.flush_harvest import FlushHarvestCreateSchema, FlushHarvestOutSchema
+from app.utils import validation_error_response
 
 bp = Blueprint("flush_harvests", __name__, url_prefix="/api/flush-harvests")
 
@@ -33,51 +33,27 @@ def list_flush_harvests():
 @bp.post("")
 @jwt_required()
 def create_flush_harvest():
-    body = request.get_json(silent=True) or {}
     db = SessionLocal()
     try:
-        room_id = int(body.get("roomId") or 0)
-        item = FlushHarvest(
-            room_id=room_id if room_id > 0 else 1,
-            harvested_at=datetime.now(timezone.utc),
-            flush_no=int(body.get("flushNo") or 1),
-            weight_kg=0,
-            grade=None,
-            operator_name=str(body.get("operatorName") or ""),
-        )
-        # BUG: add/flush before validation
-        db.add(item)
-        db.flush()
-
         try:
-            if room_id <= 0 or not db.query(Room).filter(Room.id == room_id).first():
-                raise ValueError("出菇室不存在")
-            harvested = body.get("harvestedAt")
-            if not harvested:
-                raise ValueError("采收时间必填")
-            weight = float(body.get("weightKg"))
-            if weight <= 0:
-                raise ValueError("weightKg 须大于 0")
-            grade = str(body.get("grade") or "").strip()
-            if grade not in ("A", "B", "C"):
-                raise ValueError("grade 无效")
-            op = str(body.get("operatorName") or "").strip()
-            if not op:
-                raise ValueError("操作员必填")
-            item.room_id = room_id
-            try:
-                hs = str(harvested).replace("Z", "+00:00")
-                item.harvested_at = datetime.fromisoformat(hs)
-            except Exception:
-                item.harvested_at = datetime.now(timezone.utc)
-            item.flush_no = int(body.get("flushNo") or 1)
-            item.weight_kg = weight
-            item.grade = grade
-            item.operator_name = op
-        except Exception:
-            # BUG: swallow and still commit partial row (default weight 0)
-            pass
-
+            data = create_schema.load(request.get_json(silent=True) or {})
+        except ValidationError as err:
+            return validation_error_response(err)
+        room = db.query(Room).filter(Room.id == data["room_id"]).first()
+        if not room:
+            return jsonify({"detail": "出菇室不存在"}), 400
+        operator = data["operator_name"].strip()
+        if not operator:
+            return jsonify({"detail": "操作员必填"}), 400
+        item = FlushHarvest(
+            room_id=data["room_id"],
+            harvested_at=data["harvested_at"],
+            flush_no=data["flush_no"],
+            weight_kg=data["weight_kg"],
+            grade=data["grade"],
+            operator_name=operator,
+        )
+        db.add(item)
         db.commit()
         db.refresh(item)
         return jsonify(out_schema.dump(item)), 201
